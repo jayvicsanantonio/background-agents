@@ -14,10 +14,11 @@ import {
   getLinearClient,
   emitAgentActivity,
   fetchIssueDetails,
+  fetchUser,
   updateAgentSession,
   getRepoSuggestions,
 } from "./utils/linear-client";
-import { generateInternalToken } from "./utils/internal";
+import { buildInternalAuthHeaders } from "./utils/internal";
 import { classifyRepo } from "./classifier";
 import { getAvailableRepos } from "./classifier/repos";
 import { getLinearConfig } from "./utils/integration-config";
@@ -122,13 +123,51 @@ export function buildFollowUpPrompt(params: {
 }
 
 async function getAuthHeaders(env: Env, traceId?: string): Promise<Record<string, string>> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (env.INTERNAL_CALLBACK_SECRET) {
-    const authToken = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET);
-    headers["Authorization"] = `Bearer ${authToken}`;
+  return {
+    "Content-Type": "application/json",
+    ...(await buildInternalAuthHeaders(env.INTERNAL_CALLBACK_SECRET, traceId)),
+  };
+}
+
+/**
+ * Create a session via the control plane.
+ */
+async function createSession(
+  env: Env,
+  params: {
+    repoOwner: string;
+    repoName: string;
+    title: string;
+    model: string;
+    reasoningEffort?: string;
+    actorUserId?: string;
+    actorDisplayName?: string;
+    actorEmail?: string;
+  },
+  traceId?: string
+): Promise<{ ok: true; sessionId: string } | { ok: false; status: number; body: string }> {
+  const headers = await getAuthHeaders(env, traceId);
+  const response = await env.CONTROL_PLANE.fetch("https://internal/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      ...params,
+      spawnSource: "linear-bot",
+    }),
+  });
+
+  if (!response.ok) {
+    let body = "";
+    try {
+      body = await response.text();
+    } catch {
+      /* ignore */
+    }
+    return { ok: false, status: response.status, body };
   }
-  if (traceId) headers["x-trace-id"] = traceId;
-  return headers;
+
+  const result = (await response.json()) as { sessionId: string };
+  return { ok: true, sessionId: result.sessionId };
 }
 
 // ─── Sub-handlers ────────────────────────────────────────────────────────────
@@ -198,8 +237,9 @@ async function handleFollowUp(
   const existingSession = await lookupIssueSession(env, issue.id);
   if (!existingSession) return;
 
-  const followUpContent = agentActivity?.body || comment?.body || "Follow-up on the issue.";
-  const followUpMetadata = agentActivity?.body
+  const followUpContent =
+    agentActivity?.content?.body || comment?.body || "Follow-up on the issue.";
+  const followUpMetadata = agentActivity?.content?.body
     ? { followUpSource: "linear_agent_activity", followUpAuthor: "linear" }
     : { followUpSource: "linear_comment", followUpAuthor: "unknown" };
 
@@ -387,6 +427,8 @@ async function handleNewSession(
       issue.description,
       labelNames,
       projectInfo?.name,
+      issue.team?.name ?? null,
+      issue.team?.key ?? null,
       comment?.body,
       traceId
     );
@@ -398,7 +440,7 @@ async function handleNewSession(
 
       await emitAgentActivity(client, agentSessionId, {
         type: "elicitation",
-        body: `I couldn't determine which repository to work on.\n\n${classification.reasoning}\n\n**Available repositories:**\n${altList || "None available"}\n\nPlease reply with the repository name, or configure a project→repo mapping.`,
+        body: `I couldn't determine which repository to work on.\n\n${classification.reasoning}\n\n**Available repositories:**\n${altList || "None available"}\n\nPlease reply with the repository name (e.g., \`owner/repo\`).`,
       });
 
       log.warn("agent_session.classification_uncertain", {
@@ -419,7 +461,7 @@ async function handleNewSession(
   if (!repoOwner || !repoName || !repoFullName) {
     await emitAgentActivity(client, agentSessionId, {
       type: "elicitation",
-      body: "I couldn't determine which repository to work on. Please configure a project→repo or team→repo mapping and try again.",
+      body: "I couldn't determine which repository to work on. Please reply with the repository name (e.g., `owner/repo`).",
     });
     log.warn("agent_session.repo_resolution_failed", {
       trace_id: traceId,
@@ -445,10 +487,12 @@ async function handleNewSession(
     return;
   }
 
-  // ─── Resolve model ────────────────────────────────────────────────────
+  // ─── Resolve user preferences and identity ────────────────────────────
 
   let userModel: string | undefined;
   let userReasoningEffort: string | undefined;
+  let actorDisplayName: string | undefined;
+  let actorEmail: string | undefined;
   const appUserId = webhook.appUserId;
   if (appUserId) {
     const prefs = await getUserPreferences(env, appUserId);
@@ -456,6 +500,10 @@ async function handleNewSession(
       userModel = prefs.model;
     }
     userReasoningEffort = prefs?.reasoningEffort;
+
+    const linearUser = await fetchUser(client, appUserId);
+    actorDisplayName = linearUser?.name;
+    actorEmail = linearUser?.email ?? undefined;
   }
 
   const labelModel = extractModelFromLabels(labels);
@@ -483,43 +531,39 @@ async function handleNewSession(
     true
   );
 
-  const headers = await getAuthHeaders(env, traceId);
-
-  const sessionRes = await env.CONTROL_PLANE.fetch("https://internal/sessions", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      repoOwner,
-      repoName,
+  const sessionResult = await createSession(
+    env,
+    {
+      repoOwner: repoOwner!,
+      repoName: repoName!,
       title: `${issue.identifier}: ${issue.title}`,
       model,
       reasoningEffort,
-    }),
-  });
+      actorUserId: appUserId,
+      actorDisplayName,
+      actorEmail,
+    },
+    traceId
+  );
 
-  if (!sessionRes.ok) {
-    let sessionErrBody = "";
-    try {
-      sessionErrBody = await sessionRes.text();
-    } catch {
-      /* ignore */
-    }
+  if (!sessionResult.ok) {
     await emitAgentActivity(client, agentSessionId, {
       type: "error",
-      body: `Failed to create a coding session.\n\n\`HTTP ${sessionRes.status}: ${sessionErrBody.slice(0, 200)}\``,
+      body: `Failed to create a coding session.\n\n\`HTTP ${sessionResult.status}: ${sessionResult.body.slice(0, 200)}\``,
     });
     log.error("control_plane.create_session", {
       trace_id: traceId,
       issue_identifier: issue.identifier,
       repo: repoFullName,
-      http_status: sessionRes.status,
-      response_body: sessionErrBody.slice(0, 500),
+      http_status: sessionResult.status,
+      response_body: sessionResult.body.slice(0, 500),
       duration_ms: Date.now() - startTime,
     });
     return;
   }
 
-  const session = (await sessionRes.json()) as { sessionId: string };
+  const headers = await getAuthHeaders(env, traceId);
+  const session = sessionResult;
 
   await storeIssueSession(env, issue.id, {
     sessionId: session.sessionId,

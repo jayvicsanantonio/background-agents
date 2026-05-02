@@ -41,7 +41,13 @@ export type EventType =
   | "push_error"
   | "user_message";
 export type ParticipantRole = "owner" | "member";
-export type SpawnSource = "user" | "agent" | "automation";
+export type SpawnSource =
+  | "user"
+  | "agent"
+  | "automation"
+  | "github-bot"
+  | "linear-bot"
+  | "slack-bot";
 export type ConfidenceLevel = "high" | "medium" | "low";
 
 // Participant in a session
@@ -122,6 +128,26 @@ export interface ManualPullRequestArtifactMetadata {
   base: string;
   createPrUrl: string;
   provider?: string;
+}
+
+/** Metadata stored on screenshot artifacts. */
+export interface ScreenshotArtifactMetadata {
+  /** R2 object key */
+  objectKey: string;
+  /** MIME type: image/png, image/jpeg, image/webp */
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  /** File size in bytes */
+  sizeBytes: number;
+  /** Viewport dimensions at capture time */
+  viewport?: { width: number; height: number };
+  /** URL that was screenshotted */
+  sourceUrl?: string;
+  /** Whether this is a full-page screenshot */
+  fullPage?: boolean;
+  /** Whether element annotations are overlaid */
+  annotated?: boolean;
+  /** Caption or description provided by the agent */
+  caption?: string;
 }
 
 // Pull request info
@@ -209,8 +235,10 @@ export type SandboxEvent =
   | {
       type: "artifact";
       artifactType: string;
+      artifactId?: string;
       url: string;
       metadata?: Record<string, unknown>;
+      messageId?: string;
       sandboxId: string;
       timestamp: number;
     }
@@ -261,6 +289,7 @@ export type ServerMessage =
       type: "subscribed";
       sessionId: string;
       state: SessionState;
+      artifacts: SessionArtifact[];
       participantId: string;
       participant?: { participantId: string; name: string; avatar?: string };
       replay?: {
@@ -280,10 +309,8 @@ export type ServerMessage =
   | { type: "sandbox_status"; status: SandboxStatus }
   | { type: "sandbox_ready" }
   | { type: "sandbox_error"; error: string }
-  | {
-      type: "artifact_created";
-      artifact: { id: string; type: string; url: string; prNumber?: number };
-    }
+  | { type: "artifact_created"; artifact: SessionArtifact }
+  | { type: "session_branch"; branchName: string }
   | { type: "snapshot_saved"; imageId: string; reason: string }
   | { type: "sandbox_restored"; message: string }
   | { type: "sandbox_warning"; message: string }
@@ -303,6 +330,8 @@ export type ServerMessage =
       title: string | null;
     }
   | { type: "code_server_info"; url: string; password: string }
+  | { type: "ttyd_info"; url: string; token: string }
+  | { type: "tunnel_urls"; urls: Record<string, string> }
   | { type: "error"; code: string; message: string };
 
 // Session state sent to clients
@@ -321,8 +350,12 @@ export interface SessionState {
   reasoningEffort?: string;
   isProcessing?: boolean;
   parentSessionId?: string | null;
+  totalCost?: number;
   codeServerUrl?: string | null;
   codeServerPassword?: string | null;
+  tunnelUrls?: Record<string, string> | null;
+  ttydUrl?: string | null;
+  ttydToken?: string | null;
 }
 
 // Participant presence info
@@ -344,6 +377,8 @@ export interface InstallationRepository {
   description: string | null;
   private: boolean;
   defaultBranch: string;
+  language?: string | null;
+  topics?: string[];
 }
 
 export interface RepoMetadata {
@@ -367,6 +402,8 @@ export interface RepoConfig {
   description: string;
   defaultBranch: string;
   private: boolean;
+  language?: string | null;
+  topics?: string[];
   aliases?: string[];
   keywords?: string[];
   channelAssociations?: string[];
@@ -431,12 +468,14 @@ export interface AgentResponse {
   toolCalls: ToolCallSummary[];
   artifacts: ArtifactInfo[];
   success: boolean;
+  error?: string;
 }
 
 export interface UserPreferences {
   userId: string;
   model: string;
   reasoningEffort?: string;
+  branch?: string;
   updatedAt: number;
 }
 
@@ -553,6 +592,59 @@ export interface ChildSessionDetail {
   sandbox: { status: SandboxStatus } | null;
   artifacts: Array<{ type: string; url: string; metadata: unknown }>;
   recentEvents: Array<{ type: string; data: unknown; createdAt: number }>;
+}
+
+// ─── Analytics ───────────────────────────────────────────────────────────────
+
+export const ANALYTICS_DAYS = [7, 14, 30, 90] as const;
+export type AnalyticsDays = (typeof ANALYTICS_DAYS)[number];
+
+export const ANALYTICS_BREAKDOWN_BY = ["user", "repo"] as const;
+export type AnalyticsBreakdownBy = (typeof ANALYTICS_BREAKDOWN_BY)[number];
+
+export interface AnalyticsStatusBreakdown {
+  created: number;
+  active: number;
+  completed: number;
+  failed: number;
+  archived: number;
+  cancelled: number;
+}
+
+export interface AnalyticsSummaryResponse {
+  totalSessions: number;
+  activeUsers: number;
+  totalCost: number;
+  avgCost: number;
+  totalPrs: number;
+  statusBreakdown: AnalyticsStatusBreakdown;
+}
+
+export interface AnalyticsTimeseriesPoint {
+  date: string;
+  groups: Record<string, number>;
+}
+
+export interface AnalyticsTimeseriesResponse {
+  series: AnalyticsTimeseriesPoint[];
+}
+
+export interface AnalyticsBreakdownEntry {
+  key: string;
+  displayName?: string;
+  sessions: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  cost: number;
+  prs: number;
+  messageCount: number;
+  avgDuration: number;
+  lastActive: number;
+}
+
+export interface AnalyticsBreakdownResponse {
+  entries: AnalyticsBreakdownEntry[];
 }
 
 // ─── Automation Engine ────────────────────────────────────────────────────────

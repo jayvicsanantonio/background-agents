@@ -119,6 +119,7 @@ export interface CompletionCallback {
   sessionId: string;
   messageId: string;
   success: boolean;
+  error?: string;
   timestamp: number;
   signature: string;
   context: LinearCallbackContext;
@@ -196,6 +197,7 @@ export interface AgentSessionWebhook {
   type: string;
   action: string;
   organizationId: string;
+  webhookId: string;
   appUserId?: string;
   agentSession: {
     id: string;
@@ -203,5 +205,10 @@ export interface AgentSessionWebhook {
     comment?: { body: string };
     promptContext?: string;
   };
-  agentActivity?: { body?: string };
+  agentActivity?: {
+    content?: {
+      type?: string;
+      body?: string;
+    };
+  };
 }

@@ -109,23 +109,20 @@ export async function hashToken(token: string): Promise<string> {
 }
 
 /**
- * Compare two strings in timing-safe style.
- *
- * This avoids early-return comparisons that may leak partial match info.
- * For token verification we compare fixed-length SHA-256 hex strings.
+ * Encrypt an access/refresh token pair.
+ * Returns null for tokens that weren't provided (undefined/empty).
+ * Throws if encryption of a provided token fails.
  */
-export function timingSafeEqual(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const aBytes = encoder.encode(a);
-  const bBytes = encoder.encode(b);
-  const maxLength = Math.max(aBytes.length, bBytes.length);
-
-  let diff = aBytes.length ^ bBytes.length;
-  for (let i = 0; i < maxLength; i++) {
-    const aByte = aBytes[i] ?? 0;
-    const bByte = bBytes[i] ?? 0;
-    diff |= aByte ^ bByte;
-  }
-
-  return diff === 0;
+export async function encryptTokenPair(
+  accessToken: string | undefined,
+  refreshToken: string | undefined,
+  encryptionKey: string
+): Promise<{ accessTokenEncrypted: string | null; refreshTokenEncrypted: string | null }> {
+  const accessTokenEncrypted = accessToken ? await encryptToken(accessToken, encryptionKey) : null;
+  const refreshTokenEncrypted = refreshToken
+    ? await encryptToken(refreshToken, encryptionKey)
+    : null;
+  return { accessTokenEncrypted, refreshTokenEncrypted };
 }
+
+// timingSafeEqual is exported from @open-inspect/shared — use that instead.

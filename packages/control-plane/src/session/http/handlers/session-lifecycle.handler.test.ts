@@ -23,6 +23,8 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     spawn_source: "user",
     spawn_depth: 0,
     code_server_enabled: 0,
+    total_cost: 0,
+    sandbox_settings: null,
     created_at: 1000,
     updated_at: 2000,
     ...overrides,
@@ -46,6 +48,9 @@ function createSandbox(overrides: Partial<SandboxRow> = {}): SandboxRow {
     last_spawn_error_at: null,
     code_server_url: null,
     code_server_password: null,
+    tunnel_urls: null,
+    ttyd_url: null,
+    ttyd_token: null,
     created_at: 1,
     ...overrides,
   };
@@ -95,6 +100,7 @@ function createHandler() {
   const getPublicSessionId = vi.fn<(session: SessionRow) => string>();
   const getParticipantByUserId = vi.fn<(userId: string) => ParticipantRow | null>();
   const transitionSessionStatus = vi.fn<(status: SessionRow["status"]) => Promise<boolean>>();
+  const syncSessionIndexTitle = vi.fn();
   const stopExecution = vi.fn();
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
   const sendToSandbox = vi.fn();
@@ -116,6 +122,7 @@ function createHandler() {
     getPublicSessionId,
     getParticipantByUserId,
     transitionSessionStatus,
+    syncSessionIndexTitle,
     stopExecution,
     getSandboxSocket,
     sendToSandbox,
@@ -138,6 +145,7 @@ function createHandler() {
     getPublicSessionId,
     getParticipantByUserId,
     transitionSessionStatus,
+    syncSessionIndexTitle,
     stopExecution,
     getSandboxSocket,
     sendToSandbox,
@@ -209,6 +217,7 @@ describe("createSessionLifecycleHandler", () => {
       spawnSource: "agent",
       spawnDepth: 1,
       codeServerEnabled: false,
+      sandboxSettings: null,
       createdAt: 1234,
       updatedAt: 1234,
     });
@@ -422,9 +431,18 @@ describe("createSessionLifecycleHandler", () => {
     expect(response.status).toBe(403);
   });
 
-  it("updates title, broadcasts, and returns new title", async () => {
-    const { handler, getSession, getParticipantByUserId, repository, broadcast } = createHandler();
+  it("updates title, broadcasts, syncs to D1 index, and returns new title", async () => {
+    const {
+      handler,
+      getSession,
+      getPublicSessionId,
+      getParticipantByUserId,
+      repository,
+      syncSessionIndexTitle,
+      broadcast,
+    } = createHandler();
     getSession.mockReturnValue(createSession());
+    getPublicSessionId.mockReturnValue("public-session-1");
     getParticipantByUserId.mockReturnValue(createParticipant());
 
     const response = await handler.updateTitle(
@@ -438,6 +456,7 @@ describe("createSessionLifecycleHandler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ title: "New Title" });
     expect(repository.updateSessionTitle).toHaveBeenCalledWith("session-1", "New Title", 1234);
+    expect(syncSessionIndexTitle).toHaveBeenCalledWith("public-session-1", "New Title");
     expect(broadcast).toHaveBeenCalledWith({ type: "session_title", title: "New Title" });
   });
 

@@ -2,10 +2,11 @@
  * Callback handlers for control-plane notifications.
  */
 
+import { computeHmacHex, timingSafeEqual } from "@open-inspect/shared";
 import { Hono } from "hono";
 import type { Env, CompletionCallback } from "./types";
 import { extractAgentResponse } from "./completion/extractor";
-import { buildCompletionBlocks, getFallbackText } from "./completion/blocks";
+import { buildCompletionBlocks, getFallbackText, truncateError } from "./completion/blocks";
 import { postMessage, removeReaction } from "./utils/slack-client";
 import { createLogger } from "./logger";
 
@@ -44,20 +45,8 @@ async function verifyCallbackSignature(
   secret: string
 ): Promise<boolean> {
   const { signature, ...data } = payload;
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const signatureData = encoder.encode(JSON.stringify(data));
-  const expectedSig = await crypto.subtle.sign("HMAC", key, signatureData);
-  const expectedHex = Array.from(new Uint8Array(expectedSig))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return signature === expectedHex;
+  const expectedHex = await computeHmacHex(JSON.stringify(data), secret);
+  return timingSafeEqual(signature, expectedHex);
 }
 
 /**
@@ -170,42 +159,43 @@ async function handleCompletionCallback(
     // Fetch events to build response (filtered by messageId directly)
     const agentResponse = await extractAgentResponse(env, sessionId, payload.messageId, traceId);
 
+    // Fall back to the callback payload's error if the extractor didn't find one.
+    agentResponse.error = agentResponse.error || payload.error;
+    const errorMessage = agentResponse.error;
+
     // Check if extraction succeeded (has content or was explicitly successful)
     if (!agentResponse.textContent && agentResponse.toolCalls.length === 0 && !payload.success) {
+      const displayError = truncateError(errorMessage || "Unknown error", 2000);
       log.error("callback.complete", {
         ...base,
         outcome: "error",
         error_message: "empty_agent_response",
+        agent_error: errorMessage || "Unknown error",
         duration_ms: Date.now() - startTime,
       });
-      await postMessage(
-        env.SLACK_BOT_TOKEN,
-        context.channel,
-        "The agent completed but I couldn't retrieve the response. Please check the web UI for details.",
-        {
-          thread_ts: context.threadTs,
-          blocks: [
-            {
-              type: "section",
-              text: {
-                type: "mrkdwn",
-                text: ":warning: The agent completed but I couldn't retrieve the response.",
+      await postMessage(env.SLACK_BOT_TOKEN, context.channel, `The agent failed: ${displayError}`, {
+        thread_ts: context.threadTs,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `:x: *Agent failed:* ${displayError}`,
+            },
+          },
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                text: { type: "plain_text", text: "View Session" },
+                url: `${env.WEB_APP_URL}/session/${sessionId}`,
+                action_id: "view_session",
               },
-            },
-            {
-              type: "actions",
-              elements: [
-                {
-                  type: "button",
-                  text: { type: "plain_text", text: "View Session" },
-                  url: `${env.WEB_APP_URL}/session/${sessionId}`,
-                  action_id: "view_session",
-                },
-              ],
-            },
-          ],
-        }
-      );
+            ],
+          },
+        ],
+      });
 
       if (context.reactionMessageTs) {
         await clearThinkingReaction(env, context.channel, context.reactionMessageTs, traceId);

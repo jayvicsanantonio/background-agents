@@ -8,7 +8,7 @@ import type {
 import type { Logger } from "./logger";
 import { generateInstallationToken, postReaction, checkSenderPermission } from "./github-auth";
 import { buildCodeReviewPrompt, buildCommentActionPrompt } from "./prompts";
-import { generateInternalToken } from "./utils/internal";
+import { buildInternalAuthHeaders } from "./utils/internal";
 import { getGitHubConfig, type ResolvedGitHubConfig } from "./utils/integration-config";
 
 export type HandlerResult =
@@ -16,11 +16,9 @@ export type HandlerResult =
   | { outcome: "skipped"; skip_reason: string };
 
 async function getAuthHeaders(env: Env, traceId: string): Promise<Record<string, string>> {
-  const token = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET);
   return {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${token}`,
-    "x-trace-id": traceId,
+    ...(await buildInternalAuthHeaders(env.INTERNAL_CALLBACK_SECRET, traceId)),
   };
 }
 
@@ -33,6 +31,9 @@ async function createSession(
     title: string;
     model: string;
     reasoningEffort?: string | null;
+    scmLogin: string;
+    scmUserId: string;
+    scmAvatarUrl: string;
   }
 ): Promise<string> {
   const body: Record<string, unknown> = {
@@ -40,6 +41,10 @@ async function createSession(
     repoName: params.repoName,
     title: params.title,
     model: params.model,
+    scmLogin: params.scmLogin,
+    scmUserId: params.scmUserId,
+    scmAvatarUrl: params.scmAvatarUrl,
+    spawnSource: "github-bot",
   };
   if (params.reasoningEffort) {
     body.reasoningEffort = params.reasoningEffort;
@@ -206,6 +211,9 @@ export async function handleReviewRequested(
     title: `GitHub: Review PR #${pr.number}`,
     model: config.model,
     reasoningEffort: config.reasoningEffort,
+    scmLogin: sender.login,
+    scmUserId: String(sender.id),
+    scmAvatarUrl: sender.avatar_url,
   });
   log.info("session.created", { ...meta, session_id: sessionId, action: "review" });
 
@@ -224,7 +232,7 @@ export async function handleReviewRequested(
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
     content: prompt,
-    authorId: `github:${payload.sender.login}`,
+    authorId: `github:${payload.sender.id}`,
   });
   log.info("prompt.sent", {
     ...meta,
@@ -302,6 +310,9 @@ export async function handlePullRequestOpened(
     title: `GitHub: Review PR #${pr.number}`,
     model: config.model,
     reasoningEffort: config.reasoningEffort,
+    scmLogin: sender.login,
+    scmUserId: String(sender.id),
+    scmAvatarUrl: sender.avatar_url,
   });
   log.info("session.created", { ...meta, session_id: sessionId, action: "auto_review" });
 
@@ -320,7 +331,7 @@ export async function handlePullRequestOpened(
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
     content: prompt,
-    authorId: `github:${sender.login}`,
+    authorId: `github:${sender.id}`,
   });
   log.info("prompt.sent", {
     ...meta,
@@ -404,6 +415,9 @@ export async function handleIssueComment(
     title: `GitHub: PR #${issue.number} comment`,
     model: config.model,
     reasoningEffort: config.reasoningEffort,
+    scmLogin: sender.login,
+    scmUserId: String(sender.id),
+    scmAvatarUrl: sender.avatar_url,
   });
   log.info("session.created", { ...meta, session_id: sessionId, action: "comment" });
 
@@ -420,7 +434,7 @@ export async function handleIssueComment(
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
     content: prompt,
-    authorId: `github:${sender.login}`,
+    authorId: `github:${sender.id}`,
   });
   log.info("prompt.sent", {
     ...meta,
@@ -499,6 +513,9 @@ export async function handleReviewComment(
     title: `GitHub: PR #${pr.number} review comment`,
     model: config.model,
     reasoningEffort: config.reasoningEffort,
+    scmLogin: sender.login,
+    scmUserId: String(sender.id),
+    scmAvatarUrl: sender.avatar_url,
   });
   log.info("session.created", { ...meta, session_id: sessionId, action: "review_comment" });
 
@@ -520,7 +537,7 @@ export async function handleReviewComment(
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
     content: prompt,
-    authorId: `github:${sender.login}`,
+    authorId: `github:${sender.id}`,
   });
   log.info("prompt.sent", {
     ...meta,
